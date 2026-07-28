@@ -1,0 +1,296 @@
+// Bellet data model. See docs/ARCHITECTURE.md §3.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  OWNER
+  CLIENT
+}
+
+enum BusinessStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum VerificationPurpose {
+  ACCOUNT_VERIFICATION
+  PASSWORD_RESET
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  EXPIRED
+}
+
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+}
+
+// Morning / afternoon / evening variant of a group (irdenki / günortanky / agşamky).
+enum TimeOfDay {
+  MORNING
+  AFTERNOON
+  EVENING
+}
+
+model User {
+  id            String   @id @default(cuid())
+  phone         String   @unique
+  passwordHash  String
+  email         String?  @unique
+  name          String?
+  role          Role     @default(CLIENT)
+  phoneVerified Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  business      Business?
+  bookings      Booking[]
+  refreshTokens RefreshToken[]
+  savedCenters  SavedCenter[]
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model PhoneVerification {
+  id         String              @id @default(cuid())
+  phone      String
+  purpose    VerificationPurpose
+  status     VerificationStatus  @default(PENDING)
+  expiresAt  DateTime
+  verifiedAt DateTime?
+  createdAt  DateTime            @default(now())
+
+  @@index([phone, status])
+}
+
+model Category {
+  id         String     @id @default(cuid())
+  name       String
+  slug       String     @unique
+  businesses Business[]
+}
+
+// One owner runs exactly one business (1:1) — ownerId is unique.
+model Business {
+  id          String   @id @default(cuid())
+  ownerId     String   @unique
+  owner       User     @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  categoryId  String
+  category    Category       @relation(fields: [categoryId], references: [id])
+  name        String
+  // Content i18n: per-language variants; `description` is the legacy/fallback text.
+  description   String?
+  descriptionTk String?
+  descriptionEn String?
+  descriptionRu String?
+  photos      String[]
+  status      BusinessStatus @default(PENDING)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  offerings Offering[]
+  teachers  Teacher[]
+  addresses Address[]
+  savedBy   SavedCenter[]
+
+  @@index([categoryId])
+  @@index([status])
+}
+
+// A client bookmarking a centre to come back to. The compound unique makes
+// saving twice a no-op rather than piling up duplicate rows.
+model SavedCenter {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  createdAt  DateTime @default(now())
+
+  @@unique([userId, businessId])
+  @@index([userId])
+  @@index([businessId])
+}
+
+// Turkmenistan's 5 welayats + the capital, Aşgabat. Fixed, seeded set.
+model Province {
+  id     String    @id @default(cuid())
+  slug   String    @unique
+  nameTk String
+  nameEn String
+  nameRu String
+
+  addresses Address[]
+}
+
+// A physical location of a business — a center can have buildings in
+// several places, each in its own welayat.
+model Address {
+  id         String   @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  provinceId String
+  province   Province @relation(fields: [provinceId], references: [id])
+  line       String // street/building detail text
+  createdAt  DateTime @default(now())
+
+  groups Group[]
+
+  @@index([businessId])
+  @@index([provinceId])
+}
+
+// A member of staff (mugallym) belonging to a center; assigned to specific groups.
+model Teacher {
+  id         String  @id @default(cuid())
+  businessId String
+  business   Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  name       String
+  bio        String?
+  photo      String?
+
+  groups Group[]
+
+  @@index([businessId])
+}
+
+// What a course teaches (Language, IT, Math…). A course can span several —
+// "Business English" is both Language and Business — so this is many-to-many.
+// Distinct from Category, which classifies the *business* (education, car wash…).
+model Subject {
+  id     String @id @default(cuid())
+  slug   String @unique
+  nameTk String
+  nameEn String
+  nameRu String
+  // Material Symbols icon name, so the UI needn't hard-code a slug→icon map.
+  icon   String?
+
+  offerings Offering[]
+}
+
+// A course (kurs): English, Russian, Math... It runs as one or more Groups.
+model Offering {
+  id               String   @id @default(cuid())
+  businessId       String
+  business         Business @relation(fields: [businessId], references: [id], onDelete: Cascade)
+  // Content i18n: `title`/`description` hold the first available language as a
+  // fallback for old clients and search; per-language variants are optional.
+  title            String
+  titleTk          String?
+  titleEn          String?
+  titleRu          String?
+  description      String?
+  descriptionTk    String?
+  descriptionEn    String?
+  descriptionRu    String?
+  price            Decimal  @db.Decimal(10, 2)
+  prepaymentAmount Decimal  @db.Decimal(10, 2)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  subjects Subject[]
+  groups   Group[]
+  bookings Booking[]
+
+  @@index([businessId])
+}
+
+// A concrete section of a course (topar): a day pattern + time-of-day + teacher.
+// e.g. days [1,3,5], MORNING, 09:00–10:30, taught by Merjen.
+model Group {
+  id         String    @id @default(cuid())
+  offeringId String
+  offering   Offering  @relation(fields: [offeringId], references: [id], onDelete: Cascade)
+  teacherId  String?
+  teacher    Teacher?  @relation(fields: [teacherId], references: [id], onDelete: SetNull)
+  addressId  String?
+  address    Address?  @relation(fields: [addressId], references: [id], onDelete: SetNull)
+  days       Int[] // weekday numbers, 0=Sun..6=Sat, e.g. [1,3,5]
+  timeOfDay  TimeOfDay
+  startTime  String // "09:00"
+  endTime    String // "10:30"
+  capacity   Int       @default(0) // 0 = unlimited
+  startDate     DateTime? @db.Date // first class date (başlaýan wagt)
+  durationWeeks Int? // course length in weeks (dowamlylyk)
+  enrollFrom    DateTime? @db.Date // enrollment opens (kabul edilişik başlangyç)
+  enrollUntil   DateTime? @db.Date // enrollment closes (kabul edilişik soňy)
+  createdAt  DateTime  @default(now())
+
+  bookings Booking[]
+
+  @@index([offeringId])
+  @@index([teacherId])
+  @@index([addressId])
+}
+
+model Booking {
+  id         String        @id @default(cuid())
+  clientId   String
+  client     User          @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  offeringId String
+  offering   Offering      @relation(fields: [offeringId], references: [id])
+  groupId    String?
+  group      Group?        @relation(fields: [groupId], references: [id])
+  status     BookingStatus @default(PENDING)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  payment Payment?
+
+  @@index([clientId])
+  @@index([offeringId])
+  @@index([groupId])
+}
+
+// A phone number the Android SMS-gateway app is actively reporting SMS from.
+// "Online" is derived from lastSeenAt vs GATEWAY_ONLINE_TTL_SEC — the app has
+// no reliable way to signal going offline, so staleness is the offline signal.
+model SmsGateway {
+  id          String   @id @default(cuid())
+  phoneNumber String   @unique
+  lastSeenAt  DateTime @default(now())
+  createdAt   DateTime @default(now())
+}
+
+model Payment {
+  id          String        @id @default(cuid())
+  bookingId   String        @unique
+  booking     Booking       @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  amount      Decimal       @db.Decimal(10, 2)
+  provider    String        @default("mock")
+  status      PaymentStatus @default(PENDING)
+  externalRef String?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+}
